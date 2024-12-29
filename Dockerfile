@@ -22,4 +22,4 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
 # Run the bot script when the container starts
-CMD ["python", "test.py"]
+CMD ["python", "bot.py"]
