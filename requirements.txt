@@ -1,4 +1,4 @@
 Flask
-python-telegram-bot
-requests
 google-api-python-client
+python-telegram-bot==20.3
+requests==2.31.0
