@@ -1,66 +1,118 @@
-
-import logging
 import os
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from googleapiclient.discovery import build
-from flask import Flask, request
+from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
+import logging
+import requests
 
-# Logging setup
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+# Configurations from environment variables
+BLOG_ID = os.getenv("BLOG_ID", "AIzaSyBlRLhbsLfrud7GUXsIW8bG59lu5PGDp7Q")
+API_KEY = os.getenv("API_KEY", "1359530524392796723")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7646575528:AAH-_Yz5aUxHsAT7HXDeS56P3zBb5Xsy-3g")
+PORT = int(os.getenv("PORT", 8080))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://titumvblog.koyeb.app/")
+
+# Global Variables
+subscribed_users = set()
+last_post_id = None
+
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# Variables
-BLOG_ID = "1359530524392796723"  # Replace with your Blogger Blog ID
-API_KEY = "AIzaSyBlRLhbsLfrud7GUXsIW8bG59lu5PGDp7Q"  # Replace with your Blogger API Key
-TELEGRAM_TOKEN = "7646575528:AAH-_Yz5aUxHsAT7HXDeS56P3zBb5Xsy-3g"  # Your Telegram Bot token
-PORT = int(os.getenv("PORT", 8080))  # Default port to 8080
-WEBHOOK_URL = "https://titumvblog.koyeb.app"  # Replace with your actual webhook URL
+# Function to fetch the latest blog post
+def get_latest_post():
+    url = f"https://www.googleapis.com/blogger/v3/blogs/{BLOG_ID}/posts?key={API_KEY}&maxResults=1"
+    response = requests.get(url)
+    if response.status_code == 200:
+        items = response.json().get("items", [])
+        if items:
+            return items[0]
+    return None
 
-# Flask setup
-app = Flask(__name__)
+# Broadcast function
+def broadcast_new_post(context: CallbackContext):
+    global last_post_id
+    post = get_latest_post()
+    if not post:
+        return
 
-# Telegram Application
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+    post_id = post.get("id")
+    if post_id != last_post_id:
+        last_post_id = post_id
+        title = post.get("title")
+        url = post.get("url")
+        message = f"New blog post published!\n\n{title}\n{url}"
 
-# Blogger API setup
-def search_blog_posts(query):
-    """Search for blog posts matching the query."""
-    blogger = build("blogger", "v3", developerKey=API_KEY)
-    posts = blogger.posts().list(blogId=BLOG_ID, q=query).execute()
-    return posts.get("items", [])
+        for chat_id in subscribed_users:
+            try:
+                context.bot.send_message(chat_id=chat_id, text=message)
+            except Exception as e:
+                logger.error(f"Failed to send message to {chat_id}: {e}")
 
-# Handlers
-async def start(update: Update, context) -> None:
-    """Send a welcome message when the user starts the bot."""
-    await update.message.reply_text("Welcome to Movie Finder Bot! Send me a movie name to search.")
-
-async def search_movie(update: Update, context) -> None:
-    """Search for a movie in the blog."""
-    movie_name = update.message.text
-    posts = search_blog_posts(movie_name)
-    if posts:
-        for post in posts:
-            await update.message.reply_text(f"{post['title']}:\n{post['url']}")
+# Command handlers
+def start(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+    if chat_id not in subscribed_users:
+        subscribed_users.add(chat_id)
+        update.message.reply_text(
+            "Welcome! You will now receive notifications for new blog posts."
+        )
     else:
-        await update.message.reply_text("No matching movies found.")
+        update.message.reply_text("You're already subscribed.")
 
-# Add handlers to application
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movie))
+def stop(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+    if chat_id in subscribed_users:
+        subscribed_users.remove(chat_id)
+        update.message.reply_text("You have unsubscribed from notifications.")
+    else:
+        update.message.reply_text("You're not subscribed.")
 
-# Webhook route
-@app.route(f"/bot{TELEGRAM_TOKEN}", methods=["POST"])
-def webhook():
-    """Handle incoming Telegram updates."""
-    data = request.get_json()
-    if data:
-        application.update_queue.put_nowait(Update.de_json(data, application.bot))
-    return "OK", 200
+def search(update: Update, context: CallbackContext):
+    query = " ".join(context.args)
+    if not query:
+        update.message.reply_text("Please provide a keyword to search.")
+        return
+
+    update.message.reply_text(f"Searching for posts with keyword: {query}...")
+    url = f"https://www.googleapis.com/blogger/v3/blogs/{BLOG_ID}/posts/search?q={query}&key={API_KEY}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        posts = response.json().get("items", [])
+        if not posts:
+            update.message.reply_text("No posts found.")
+            return
+
+        for post in posts[:5]:
+            title = post.get("title")
+            url = post.get("url")
+            update.message.reply_text(f"{title}\n{url}")
+    else:
+        update.message.reply_text("Error fetching posts. Try again later.")
+
+# Main function
+def main():
+    updater = Updater(BOT_TOKEN)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("stop", stop))
+    dispatcher.add_handler(CommandHandler("search", search))
+
+    job_queue = updater.job_queue
+    job_queue.run_repeating(broadcast_new_post, interval=60, first=10)
+
+    # Start webhook listener
+    updater.start_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=BOT_TOKEN,
+        webhook_url=WEBHOOK_URL + BOT_TOKEN,
+    )
+
+    updater.idle()
 
 if __name__ == "__main__":
-    # Set webhook URL
-    application.bot.set_webhook(url=f"{WEBHOOK_URL}/bot{TELEGRAM_TOKEN}")
-
-    # Run Flask app
-    app.run(host="0.0.0.0", port=PORT)
+    main()
